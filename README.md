@@ -1,11 +1,11 @@
-# Session Stats (Geode mod)
+# IPGDGLL List (Geode mod)
 
-Live in-level overlay for Geometry Dash 2.2081 (Geode 5.11.2): attempts, deaths, session best, last death %, play time and all-time deaths.
+Browse the IPGDGLL list inside Geometry Dash 2.2081 (Geode 5.11.2).
 
 ## Build it (easy way, no setup)
 1. Make a new GitHub repo and upload everything in this folder (including the `.github` folder).
 2. Go to the **Actions** tab. The "Build Geode Mod" workflow runs on its own (or click **Run workflow**).
-3. When it's done, open the run and download **Build Output**. Inside is `pester.session-stats.geode`.
+3. When it's done, open the run and download **Build Output**. Inside is `pester.ipgdgll-list.geode`.
 4. Put that file in your Geode mods folder (`Geometry Dash/geode/mods`) and restart GD.
 
 ## Build it locally

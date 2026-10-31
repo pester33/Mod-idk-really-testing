@@ -4,73 +4,16 @@
 		"win": "2.2081",
 		"android": "2.2081"
 	},
-	"id": "pester.session-stats",
-	"name": "Session Stats",
-	"version": "v1.1.0",
+	"id": "pester.ipgdgll-list",
+	"name": "IPGDGLL List",
+	"version": "v2.0.0",
 	"developer": "Pester",
-	"description": "Live overlay with your attempts, deaths, session best and play time, plus IPGDGLL rank and record submitting.",
+	"description": "Browse the IPGDGLL list right inside GD, from a button on the Search screen.",
 	"tags": [
-		"interface",
-		"utility"
+		"online",
+		"interface"
 	],
 	"settings": {
-		"show-overlay": {
-			"type": "bool",
-			"name": "Show Overlay",
-			"description": "Show the stats overlay while playing a level.",
-			"default": true
-		},
-		"position": {
-			"type": "string",
-			"name": "Position",
-			"description": "Which corner of the screen the overlay sits in.",
-			"default": "Top Left",
-			"one-of": [
-				"Top Left",
-				"Top Right",
-				"Bottom Left",
-				"Bottom Right"
-			]
-		},
-		"scale": {
-			"type": "float",
-			"name": "Size",
-			"description": "Text size of the overlay.",
-			"default": 0.35,
-			"min": 0.2,
-			"max": 0.7,
-			"control": {
-				"slider": true,
-				"slider-step": 0.05
-			}
-		},
-		"opacity": {
-			"type": "int",
-			"name": "Opacity",
-			"description": "How see-through the overlay is (0 = invisible, 255 = solid).",
-			"default": 180,
-			"min": 30,
-			"max": 255,
-			"control": {
-				"slider": true
-			}
-		},
-		"best-popup": {
-			"type": "bool",
-			"name": "New Best Popup",
-			"description": "Flash a \"NEW BEST\" message when you beat your session best.",
-			"default": true
-		},
-		"ipgdgll-title": {
-			"type": "title",
-			"name": "IPGDGLL"
-		},
-		"ipgdgll-rank": {
-			"type": "bool",
-			"name": "Show IPGDGLL Rank",
-			"description": "Show the level's place on IPGDGLL in the overlay when it's on the list.",
-			"default": true
-		},
 		"ipgdgll-submit": {
 			"type": "bool",
 			"name": "Send Progress",

@@ -1,4 +1,5 @@
 #include <Geode/Geode.hpp>
+#include <Geode/modify/LevelSearchLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
@@ -10,16 +11,6 @@ using namespace geode::prelude;
 static constexpr auto IPGDGLL_URL = "https://daqvzyguqzfennpodsdh.supabase.co";
 static constexpr auto IPGDGLL_KEY = "sb_publishable_ZroKxa7t7nlpq-AvwZMVPg_3RHOBVrc";
 
-// Formats seconds as m:ss or h:mm:ss
-static std::string formatTime(double seconds) {
-    int total = static_cast<int>(seconds);
-    int h = total / 3600;
-    int m = (total / 60) % 60;
-    int s = total % 60;
-    if (h > 0) return fmt::format("{}:{:02}:{:02}", h, m, s);
-    return fmt::format("{}:{:02}", m, s);
-}
-
 static web::WebRequest supabaseRequest() {
     web::WebRequest req;
     req.header("apikey", IPGDGLL_KEY);
@@ -28,7 +19,254 @@ static web::WebRequest supabaseRequest() {
     return req;
 }
 
-// Sends progress to IPGDGLL as a pending record. Runs in the background and survives leaving the level.
+// ---------------------------------------------------------------------------
+// The list popup
+// ---------------------------------------------------------------------------
+
+struct ListLevel {
+    int rank = 0;
+    std::string name;
+    std::string creator;
+    std::string gdID;
+    bool possible = true;
+};
+
+class IpgdgllListPopup : public Popup {
+protected:
+    static constexpr float WIDTH = 400.f;
+    static constexpr float HEIGHT = 270.f;
+    static constexpr float LIST_W = 360.f;
+    static constexpr float LIST_H = 195.f;
+    static constexpr float ROW_H = 34.f;
+
+    ScrollLayer* m_list = nullptr;
+    CCLabelBMFont* m_status = nullptr;
+    std::vector<ListLevel> m_levels;
+    std::string m_filter = "All";
+    std::vector<CCMenuItemSpriteExtra*> m_tabs;
+    async::TaskHolder<web::WebResponse> m_task;
+
+    bool init() {
+        if (!Popup::init(WIDTH, HEIGHT)) return false;
+        this->setTitle("IPGDGLL List");
+
+        auto center = m_mainLayer->getContentSize() / 2;
+
+        // Dark background behind the list
+        auto bg = CCScale9Sprite::create("square02b_001.png");
+        bg->setColor({ 0, 0, 0 });
+        bg->setOpacity(80);
+        bg->setContentSize({ LIST_W + 6.f, LIST_H + 6.f });
+        bg->setPosition({ center.width, center.height - 16.f });
+        m_mainLayer->addChild(bg);
+
+        m_list = ScrollLayer::create({ LIST_W, LIST_H });
+        m_list->setPosition({ center.width - LIST_W / 2, center.height - 16.f - LIST_H / 2 });
+        m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(3.f));
+        m_mainLayer->addChild(m_list);
+
+        m_status = CCLabelBMFont::create("Loading...", "bigFont.fnt");
+        m_status->setScale(0.5f);
+        m_status->setPosition({ center.width, center.height - 16.f });
+        m_mainLayer->addChild(m_status, 5);
+
+        // All / Possible / Impossible tabs (same as the website)
+        float tabY = HEIGHT - 46.f;
+        float tabX = center.width - 110.f;
+        for (auto name : { "All", "Possible", "Impossible" }) {
+            auto spr = ButtonSprite::create(name, "bigFont.fnt", "GJ_button_04.png", 0.8f);
+            spr->setScale(0.5f);
+            auto btn = CCMenuItemExt::createSpriteExtra(spr, [this, name](CCMenuItemSpriteExtra*) {
+                m_filter = name;
+                this->rebuild();
+            });
+            btn->setUserObject(CCString::create(name));
+            btn->setPosition({ tabX, tabY });
+            m_buttonMenu->addChild(btn);
+            m_tabs.push_back(btn);
+            tabX += 110.f;
+        }
+        this->updateTabs();
+
+        // Open the website
+        auto webSpr = ButtonSprite::create("Website", "goldFont.fnt", "GJ_button_01.png", 0.8f);
+        webSpr->setScale(0.55f);
+        auto webBtn = CCMenuItemExt::createSpriteExtra(webSpr, [](CCMenuItemSpriteExtra*) {
+            web::openLinkInBrowser("https://ipgdgll.vercel.app");
+        });
+        webBtn->setPosition({ center.width, 14.f });
+        m_buttonMenu->addChild(webBtn);
+
+        this->load();
+        return true;
+    }
+
+    void updateTabs() {
+        for (auto btn : m_tabs) {
+            auto name = static_cast<CCString*>(btn->getUserObject())->getCString();
+            auto spr = static_cast<ButtonSprite*>(btn->getNormalImage());
+            spr->updateBGImage(m_filter == name ? "GJ_button_02.png" : "GJ_button_04.png");
+        }
+    }
+
+    void load() {
+        auto url = fmt::format(
+            "{}/rest/v1/levels?select=name,creator,position,possible,gd_id&order=position", IPGDGLL_URL
+        );
+        m_task.spawn(supabaseRequest().get(url), [this](web::WebResponse res) {
+            if (!res.ok()) {
+                log::warn("IPGDGLL list failed: HTTP {} {}", res.code(), res.string().unwrapOr(""));
+                m_status->setString("Couldn't load the list.\nCheck your internet.");
+                return;
+            }
+            auto json = res.json().unwrapOr(matjson::Value());
+            if (!json.isArray()) {
+                m_status->setString("Couldn't read the list.");
+                return;
+            }
+
+            m_levels.clear();
+            int rank = 1;
+            for (auto& entry : json) {
+                ListLevel lvl;
+                lvl.rank = rank++; // same numbering as the website
+                lvl.name = entry["name"].asString().unwrapOr("Unknown");
+                lvl.creator = entry["creator"].asString().unwrapOr("");
+                lvl.possible = entry["possible"].asBool().unwrapOr(true); // null counts as possible
+                auto& gd = entry["gd_id"];
+                if (gd.isString()) lvl.gdID = gd.asString().unwrapOr("");
+                else if (gd.isNumber()) lvl.gdID = std::to_string(gd.asInt().unwrapOr(0));
+                if (lvl.gdID == "0") lvl.gdID.clear();
+                m_levels.push_back(std::move(lvl));
+            }
+            this->rebuild();
+        });
+    }
+
+    void rebuild() {
+        this->updateTabs();
+        auto content = m_list->m_contentLayer;
+        content->removeAllChildren();
+
+        int shown = 0;
+        for (auto& lvl : m_levels) {
+            if (m_filter == "Possible" && !lvl.possible) continue;
+            if (m_filter == "Impossible" && lvl.possible) continue;
+            content->addChild(this->createRow(lvl));
+            shown++;
+        }
+
+        if (m_levels.empty()) m_status->setString("The list is empty.");
+        else if (shown == 0) m_status->setString(fmt::format("No {} levels.", m_filter).c_str());
+        m_status->setVisible(shown == 0);
+
+        content->updateLayout();
+        m_list->scrollToTop();
+    }
+
+    CCNode* createRow(ListLevel const& lvl) {
+        auto row = CCNode::create();
+        row->setContentSize({ LIST_W, ROW_H });
+
+        auto rowBg = CCScale9Sprite::create("square02b_001.png");
+        rowBg->setColor(lvl.rank % 2 ? ccColor3B{ 161, 88, 44 } : ccColor3B{ 194, 114, 62 });
+        rowBg->setContentSize({ LIST_W - 4.f, ROW_H });
+        rowBg->setPosition({ LIST_W / 2, ROW_H / 2 });
+        row->addChild(rowBg);
+
+        auto rankLbl = CCLabelBMFont::create(fmt::format("#{}", lvl.rank).c_str(), "goldFont.fnt");
+        rankLbl->limitLabelWidth(40.f, 0.65f, 0.3f);
+        rankLbl->setPosition({ 26.f, ROW_H / 2 });
+        row->addChild(rankLbl);
+
+        auto nameLbl = CCLabelBMFont::create(lvl.name.c_str(), "bigFont.fnt");
+        nameLbl->setAnchorPoint({ 0.f, 0.5f });
+        nameLbl->limitLabelWidth(190.f, 0.5f, 0.2f);
+        nameLbl->setPosition({ 52.f, ROW_H / 2 + 6.f });
+        row->addChild(nameLbl);
+
+        auto info = lvl.creator.empty() ? std::string() : "by " + lvl.creator + "  ";
+        info += lvl.possible ? "Possible" : "Impossible";
+        auto infoLbl = CCLabelBMFont::create(info.c_str(), "chatFont.fnt");
+        infoLbl->setAnchorPoint({ 0.f, 0.5f });
+        infoLbl->limitLabelWidth(190.f, 0.55f, 0.2f);
+        infoLbl->setColor(lvl.possible ? ccColor3B{ 170, 255, 170 } : ccColor3B{ 255, 150, 150 });
+        infoLbl->setPosition({ 52.f, ROW_H / 2 - 7.f });
+        row->addChild(infoLbl);
+
+        auto menu = CCMenu::create();
+        menu->setPosition({ 0.f, 0.f });
+        menu->setContentSize(row->getContentSize());
+        row->addChild(menu);
+
+        if (!lvl.gdID.empty()) {
+            auto spr = ButtonSprite::create("View", "bigFont.fnt", "GJ_button_01.png", 0.8f);
+            spr->setScale(0.5f);
+            auto id = lvl.gdID;
+            auto btn = CCMenuItemExt::createSpriteExtra(spr, [id](CCMenuItemSpriteExtra*) {
+                // Search GD for the level ID; this opens the level in the normal level browser
+                auto search = GJSearchObject::create(SearchType::Search, id);
+                auto scene = LevelBrowserLayer::scene(search);
+                CCDirector::sharedDirector()->pushScene(CCTransitionFade::create(0.5f, scene));
+            });
+            btn->setPosition({ LIST_W - 38.f, ROW_H / 2 });
+            menu->addChild(btn);
+        } else {
+            auto noId = CCLabelBMFont::create("No ID", "goldFont.fnt");
+            noId->setScale(0.4f);
+            noId->setOpacity(150);
+            noId->setPosition({ LIST_W - 38.f, ROW_H / 2 });
+            row->addChild(noId);
+        }
+
+        return row;
+    }
+
+public:
+    static IpgdgllListPopup* create() {
+        auto ret = new IpgdgllListPopup();
+        if (ret->init()) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// "IPGDGLL List" button on the Search screen
+// ---------------------------------------------------------------------------
+
+class $modify(IpgdgllSearchLayer, LevelSearchLayer) {
+    bool init(int type) {
+        if (!LevelSearchLayer::init(type)) return false;
+
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+
+        auto spr = ButtonSprite::create("IPGDGLL List", "goldFont.fnt", "GJ_button_01.png", 0.8f);
+        spr->setScale(0.6f);
+        auto btn = CCMenuItemExt::createSpriteExtra(spr, [](CCMenuItemSpriteExtra*) {
+            if (auto popup = IpgdgllListPopup::create()) popup->show();
+        });
+        btn->setID("ipgdgll-list-button"_spr);
+
+        auto menu = CCMenu::create();
+        menu->setID("ipgdgll-menu"_spr);
+        menu->setPosition({ 0.f, 0.f });
+        menu->addChild(btn);
+        // Left side of the screen, below the back button
+        btn->setPosition({ 52.f, winSize.height / 2.f - 20.f });
+        this->addChild(menu, 10);
+
+        return true;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Optional: send new bests on IPGDGLL levels as pending records (needs mod token)
+// ---------------------------------------------------------------------------
+
 static void submitToIpgdgll(int levelID, int percent, int attempts) {
     auto token = Mod::get()->getSettingValue<std::string>("ipgdgll-token");
     if (token.empty()) return;
@@ -66,111 +304,43 @@ static void submitToIpgdgll(int levelID, int percent, int attempts) {
             } else if (status == "banned") {
                 Notification::create("IPGDGLL: your account is banned from submitting", NotificationIcon::Error)->show();
             } else {
+                // "not_listed" etc: level isn't on the list, nothing to do
                 log::info("IPGDGLL submit result: {}", status);
             }
         }
     );
 }
 
-class $modify(SessionStatsLayer, PlayLayer) {
+class $modify(IpgdgllPlayLayer, PlayLayer) {
     struct Fields {
-        CCLabelBMFont* label = nullptr;
-        CCLabelBMFont* popup = nullptr;
-        int deaths = 0;
-        int bestPercent = 0;
-        int lastDeathPercent = -1;
-        double playTime = 0.0;
-        int lastShownSecond = -1;
+        int best = 0;
         bool diedThisAttempt = false;
         bool completed = false;
-
-        // IPGDGLL
         bool onList = false;
-        std::string listLine;
-        async::TaskHolder<web::WebResponse> rankTask;
+        async::TaskHolder<web::WebResponse> lookup;
     };
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
-        this->fetchListInfo();
-
-        auto mod = Mod::get();
-        if (!mod->getSettingValue<bool>("show-overlay")) return true;
-
-        auto winSize = CCDirector::sharedDirector()->getWinSize();
-        auto position = mod->getSettingValue<std::string>("position");
-        float scale = static_cast<float>(mod->getSettingValue<double>("scale"));
-        auto opacity = static_cast<GLubyte>(mod->getSettingValue<int64_t>("opacity"));
-
-        bool top = position.starts_with("Top");
-        bool left = position.ends_with("Left");
-        float pad = 5.f;
-
-        auto label = CCLabelBMFont::create("", "bigFont.fnt");
-        label->setAlignment(left ? kCCTextAlignmentLeft : kCCTextAlignmentRight);
-        label->setAnchorPoint({ left ? 0.f : 1.f, top ? 1.f : 0.f });
-        label->setPosition({
-            left ? pad : winSize.width - pad,
-            top ? winSize.height - pad : pad
-        });
-        label->setScale(scale);
-        label->setOpacity(opacity);
-        label->setID("session-stats-label"_spr);
-        this->addChild(label, 9999);
-        m_fields->label = label;
-
-        auto popup = CCLabelBMFont::create("NEW BEST!", "goldFont.fnt");
-        popup->setPosition({ winSize.width / 2.f, winSize.height * 0.72f });
-        popup->setScale(0.9f);
-        popup->setOpacity(0);
-        popup->setID("session-stats-popup"_spr);
-        this->addChild(popup, 9999);
-        m_fields->popup = popup;
-
-        this->refreshStats();
+        // Only check the list if the player set up submitting
+        int id = m_level ? m_level->m_levelID.value() : 0;
+        if (id > 0 && Mod::get()->getSettingValue<bool>("ipgdgll-submit")
+            && !Mod::get()->getSettingValue<std::string>("ipgdgll-token").empty()) {
+            auto url = fmt::format("{}/rest/v1/levels?select=id&gd_id=eq.{}&limit=1", IPGDGLL_URL, id);
+            m_fields->lookup.spawn(supabaseRequest().get(url), [this](web::WebResponse res) {
+                if (!res.ok()) return;
+                auto json = res.json().unwrapOr(matjson::Value());
+                m_fields->onList = json.isArray() && json.size() > 0;
+            });
+        }
         return true;
     }
 
-    int levelID() {
-        return m_level ? m_level->m_levelID.value() : 0;
-    }
-
-    // Looks this level up on IPGDGLL by its GD level ID
-    void fetchListInfo() {
-        int id = this->levelID();
-        if (id <= 0) return; // local / editor levels aren't on the list
-
-        auto url = fmt::format(
-            "{}/rest/v1/levels?select=name,position,possible&gd_id=eq.{}&limit=1", IPGDGLL_URL, id
-        );
-
-        m_fields->rankTask.spawn(supabaseRequest().get(url), [this](web::WebResponse res) {
-            if (!res.ok()) {
-                log::warn("IPGDGLL lookup failed: HTTP {}", res.code());
-                return;
-            }
-            auto json = res.json().unwrapOr(matjson::Value());
-            if (!json.isArray() || json.size() == 0) return; // not on the list
-
-            auto entry = json[0];
-            int pos = entry["position"].asInt().unwrapOr(0);
-            bool possible = entry["possible"].asBool().unwrapOr(true); // null counts as possible
-
-            auto f = m_fields.self();
-            f->onList = true;
-            f->listLine = pos > 0
-                ? fmt::format("IPGDGLL #{} ({})", pos, possible ? "Possible" : "Impossible")
-                : "On IPGDGLL";
-            this->refreshStats();
-        });
-    }
-
     bool canSubmit() {
-        auto mod = Mod::get();
         return m_fields->onList
-            && mod->getSettingValue<bool>("ipgdgll-submit")
-            && !mod->getSettingValue<std::string>("ipgdgll-token").empty()
+            && Mod::get()->getSettingValue<bool>("ipgdgll-submit")
+            && !Mod::get()->getSettingValue<std::string>("ipgdgll-token").empty()
             && !m_isPracticeMode
             && !m_isPlatformer
             && !m_isTestMode
@@ -179,110 +349,39 @@ class $modify(SessionStatsLayer, PlayLayer) {
 
     void maybeSubmit(int percent) {
         if (!this->canSubmit()) return;
-        int id = this->levelID();
+        int id = m_level->m_levelID.value();
         int alreadySent = Mod::get()->getSavedValue<int>(fmt::format("ipgdgll-sent-{}", id), 0);
         if (percent <= alreadySent) return;
         submitToIpgdgll(id, percent, m_attempts);
     }
 
-    void refreshStats() {
-        auto f = m_fields.self();
-        if (!f->label) return;
-
-        int totalDeaths = Mod::get()->getSavedValue<int>("total-deaths", 0);
-
-        std::string text;
-        if (f->onList && Mod::get()->getSettingValue<bool>("ipgdgll-rank")) {
-            text += f->listLine + "\n";
-        }
-        text += fmt::format("Attempt {}\nDeaths: {}\n", m_attempts, f->deaths);
-        if (!m_isPlatformer) {
-            text += fmt::format("Session Best: {}%\n", f->bestPercent);
-            if (f->lastDeathPercent >= 0) {
-                text += fmt::format("Last Death: {}%\n", f->lastDeathPercent);
-            }
-        }
-        text += fmt::format("Time: {}\n", formatTime(f->playTime));
-        text += fmt::format("All-time Deaths: {}", totalDeaths);
-        if (m_isPracticeMode) text += "\n(Practice)";
-
-        f->label->setString(text.c_str());
-    }
-
-    void showPopup(std::string const& text) {
-        auto popup = m_fields->popup;
-        if (!popup || !Mod::get()->getSettingValue<bool>("best-popup")) return;
-        popup->setString(text.c_str());
-        popup->stopAllActions();
-        popup->setOpacity(0);
-        popup->setScale(1.2f);
-        popup->runAction(CCSequence::create(
-            CCSpawn::create(CCFadeIn::create(0.12f), CCEaseBackOut::create(CCScaleTo::create(0.25f, 0.9f)), nullptr),
-            CCDelayTime::create(0.9f),
-            CCFadeOut::create(0.4f),
-            nullptr
-        ));
-    }
-
     void resetLevel() {
         PlayLayer::resetLevel();
         m_fields->diedThisAttempt = false;
-        this->refreshStats();
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         PlayLayer::destroyPlayer(player, object);
-
-        // GD "kills" the player with a hidden spike on load as an anti-cheat check; ignore it.
         if (object == m_anticheatSpike) return;
 
         auto f = m_fields.self();
-        // Only count once per attempt (dual mode can call this twice) and only real deaths.
         if (f->diedThisAttempt || f->completed || !player || !player->m_isDead) return;
         f->diedThisAttempt = true;
-        f->deaths++;
 
-        auto mod = Mod::get();
-        mod->setSavedValue<int>("total-deaths", mod->getSavedValue<int>("total-deaths", 0) + 1);
-
-        if (!m_isPlatformer) {
-            int percent = this->getCurrentPercentInt();
-            f->lastDeathPercent = percent;
-            if (!m_isPracticeMode && percent > f->bestPercent) {
-                bool hadBest = f->bestPercent > 0;
-                f->bestPercent = percent;
-                if (hadBest) this->showPopup(fmt::format("NEW BEST! {}%", percent));
-                this->maybeSubmit(percent);
-            }
+        if (m_isPlatformer || m_isPracticeMode) return;
+        int percent = this->getCurrentPercentInt();
+        if (percent > f->best) {
+            f->best = percent;
+            this->maybeSubmit(percent);
         }
-
-        this->refreshStats();
     }
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-
         auto f = m_fields.self();
-        if (!m_isPaused && !f->completed) f->playTime += dt;
-
-        // Detect level completion without needing an extra hook
         if (m_hasCompletedLevel && !f->completed) {
             f->completed = true;
-            if (!m_isPracticeMode && !m_isPlatformer) {
-                f->bestPercent = 100;
-                this->maybeSubmit(100);
-            }
-            this->showPopup(fmt::format("GG! {} attempts", m_attempts));
-            this->refreshStats();
-        }
-
-        if (!f->label) return;
-
-        // Only rebuild the text when the shown second changes
-        int second = static_cast<int>(f->playTime);
-        if (second != f->lastShownSecond) {
-            f->lastShownSecond = second;
-            this->refreshStats();
+            this->maybeSubmit(100);
         }
     }
 };

@@ -55,6 +55,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-build
-          name: Session Stats (latest build)
+          name: IPGDGLL List (latest build)
           make_latest: true
           files: ${{ steps.build.outputs.build-output }}/*.geode
