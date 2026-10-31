@@ -1,6 +1,6 @@
 # Session Stats (Geode mod)
 
-Live in-level overlay for Geometry Dash 2.2091 (Geode 5.11.2): attempts, deaths, session best, last death %, play time and all-time deaths.
+Live in-level overlay for Geometry Dash 2.2081 (Geode 5.11.2): attempts, deaths, session best, last death %, play time and all-time deaths.
 
 ## Build it (easy way, no setup)
 1. Make a new GitHub repo and upload everything in this folder (including the `.github` folder).

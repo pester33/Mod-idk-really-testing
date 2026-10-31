@@ -26,8 +26,8 @@ class $modify(SessionStatsLayer, PlayLayer) {
         bool completed = false;
     };
 
-    bool init(GJGameLevel* level, bool dontCreateObjects) {
-        if (!PlayLayer::init(level, dontCreateObjects)) return false;
+    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
 
         auto mod = Mod::get();
         if (!mod->getSettingValue<bool>("show-overlay")) return true;
