@@ -1,7 +1,14 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
+#include <Geode/utils/web.hpp>
+#include <Geode/utils/async.hpp>
 
 using namespace geode::prelude;
+
+// IPGDGLL Supabase project. The publishable key is meant to be public (it's in the site's JS too);
+// what it can do is limited by Row Level Security on the database.
+static constexpr auto IPGDGLL_URL = "https://daqvzyguqzfennpodsdh.supabase.co";
+static constexpr auto IPGDGLL_KEY = "sb_publishable_ZroKxa7t7nlpq-AvwZMVPg_3RHOBVrc";
 
 // Formats seconds as m:ss or h:mm:ss
 static std::string formatTime(double seconds) {
@@ -11,6 +18,58 @@ static std::string formatTime(double seconds) {
     int s = total % 60;
     if (h > 0) return fmt::format("{}:{:02}:{:02}", h, m, s);
     return fmt::format("{}:{:02}", m, s);
+}
+
+static web::WebRequest supabaseRequest() {
+    web::WebRequest req;
+    req.header("apikey", IPGDGLL_KEY);
+    req.header("Content-Type", "application/json");
+    req.timeout(std::chrono::seconds(10));
+    return req;
+}
+
+// Sends progress to IPGDGLL as a pending record. Runs in the background and survives leaving the level.
+static void submitToIpgdgll(int levelID, int percent, int attempts) {
+    auto token = Mod::get()->getSettingValue<std::string>("ipgdgll-token");
+    if (token.empty()) return;
+
+    auto body = matjson::makeObject({
+        { "p_token", token },
+        { "p_gd_id", std::to_string(levelID) },
+        { "p_progress", percent },
+        { "p_attempts", attempts },
+    });
+
+    auto req = supabaseRequest();
+    req.bodyJSON(body);
+
+    async::spawn(
+        req.post(fmt::format("{}/rest/v1/rpc/mod_submit_record", IPGDGLL_URL)),
+        [levelID, percent](web::WebResponse res) {
+            if (!res.ok()) {
+                log::warn("IPGDGLL submit failed: HTTP {} {}", res.code(), res.string().unwrapOr(""));
+                Notification::create("IPGDGLL: couldn't send progress", NotificationIcon::Error)->show();
+                return;
+            }
+            auto status = res.json().unwrapOr(matjson::Value()).asString().unwrapOr("");
+            auto key = fmt::format("ipgdgll-sent-{}", levelID);
+
+            if (status == "submitted" || status == "updated") {
+                Mod::get()->setSavedValue<int>(key, percent);
+                Notification::create(
+                    fmt::format("IPGDGLL: {}% sent for review", percent), NotificationIcon::Success
+                )->show();
+            } else if (status == "not_higher") {
+                Mod::get()->setSavedValue<int>(key, percent);
+            } else if (status == "bad_token") {
+                Notification::create("IPGDGLL: mod token is wrong, copy it again from your profile", NotificationIcon::Error, 4.f)->show();
+            } else if (status == "banned") {
+                Notification::create("IPGDGLL: your account is banned from submitting", NotificationIcon::Error)->show();
+            } else {
+                log::info("IPGDGLL submit result: {}", status);
+            }
+        }
+    );
 }
 
 class $modify(SessionStatsLayer, PlayLayer) {
@@ -24,10 +83,17 @@ class $modify(SessionStatsLayer, PlayLayer) {
         int lastShownSecond = -1;
         bool diedThisAttempt = false;
         bool completed = false;
+
+        // IPGDGLL
+        bool onList = false;
+        std::string listLine;
+        async::TaskHolder<web::WebResponse> rankTask;
     };
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+
+        this->fetchListInfo();
 
         auto mod = Mod::get();
         if (!mod->getSettingValue<bool>("show-overlay")) return true;
@@ -66,13 +132,70 @@ class $modify(SessionStatsLayer, PlayLayer) {
         return true;
     }
 
+    int levelID() {
+        return m_level ? m_level->m_levelID.value() : 0;
+    }
+
+    // Looks this level up on IPGDGLL by its GD level ID
+    void fetchListInfo() {
+        int id = this->levelID();
+        if (id <= 0) return; // local / editor levels aren't on the list
+
+        auto url = fmt::format(
+            "{}/rest/v1/levels?select=name,position,possible&gd_id=eq.{}&limit=1", IPGDGLL_URL, id
+        );
+
+        m_fields->rankTask.spawn(supabaseRequest().get(url), [this](web::WebResponse res) {
+            if (!res.ok()) {
+                log::warn("IPGDGLL lookup failed: HTTP {}", res.code());
+                return;
+            }
+            auto json = res.json().unwrapOr(matjson::Value());
+            if (!json.isArray() || json.size() == 0) return; // not on the list
+
+            auto entry = json[0];
+            int pos = entry["position"].asInt().unwrapOr(0);
+            bool possible = entry["possible"].asBool().unwrapOr(true); // null counts as possible
+
+            auto f = m_fields.self();
+            f->onList = true;
+            f->listLine = pos > 0
+                ? fmt::format("IPGDGLL #{} ({})", pos, possible ? "Possible" : "Impossible")
+                : "On IPGDGLL";
+            this->refreshStats();
+        });
+    }
+
+    bool canSubmit() {
+        auto mod = Mod::get();
+        return m_fields->onList
+            && mod->getSettingValue<bool>("ipgdgll-submit")
+            && !mod->getSettingValue<std::string>("ipgdgll-token").empty()
+            && !m_isPracticeMode
+            && !m_isPlatformer
+            && !m_isTestMode
+            && !m_startPosObject; // start position runs aren't real records
+    }
+
+    void maybeSubmit(int percent) {
+        if (!this->canSubmit()) return;
+        int id = this->levelID();
+        int alreadySent = Mod::get()->getSavedValue<int>(fmt::format("ipgdgll-sent-{}", id), 0);
+        if (percent <= alreadySent) return;
+        submitToIpgdgll(id, percent, m_attempts);
+    }
+
     void refreshStats() {
         auto f = m_fields.self();
         if (!f->label) return;
 
         int totalDeaths = Mod::get()->getSavedValue<int>("total-deaths", 0);
 
-        std::string text = fmt::format("Attempt {}\nDeaths: {}\n", m_attempts, f->deaths);
+        std::string text;
+        if (f->onList && Mod::get()->getSettingValue<bool>("ipgdgll-rank")) {
+            text += f->listLine + "\n";
+        }
+        text += fmt::format("Attempt {}\nDeaths: {}\n", m_attempts, f->deaths);
         if (!m_isPlatformer) {
             text += fmt::format("Session Best: {}%\n", f->bestPercent);
             if (f->lastDeathPercent >= 0) {
@@ -129,6 +252,7 @@ class $modify(SessionStatsLayer, PlayLayer) {
                 bool hadBest = f->bestPercent > 0;
                 f->bestPercent = percent;
                 if (hadBest) this->showPopup(fmt::format("NEW BEST! {}%", percent));
+                this->maybeSubmit(percent);
             }
         }
 
@@ -139,17 +263,20 @@ class $modify(SessionStatsLayer, PlayLayer) {
         PlayLayer::postUpdate(dt);
 
         auto f = m_fields.self();
-        if (!f->label) return;
-
         if (!m_isPaused && !f->completed) f->playTime += dt;
 
         // Detect level completion without needing an extra hook
         if (m_hasCompletedLevel && !f->completed) {
             f->completed = true;
-            if (!m_isPracticeMode && !m_isPlatformer) f->bestPercent = 100;
+            if (!m_isPracticeMode && !m_isPlatformer) {
+                f->bestPercent = 100;
+                this->maybeSubmit(100);
+            }
             this->showPopup(fmt::format("GG! {} attempts", m_attempts));
             this->refreshStats();
         }
+
+        if (!f->label) return;
 
         // Only rebuild the text when the shown second changes
         int second = static_cast<int>(f->playTime);

@@ -6,10 +6,13 @@
 	},
 	"id": "pester.session-stats",
 	"name": "Session Stats",
-	"version": "v1.0.0",
+	"version": "v1.1.0",
 	"developer": "Pester",
-	"description": "Live overlay with your attempts, deaths, session best and play time.",
-	"tags": ["interface", "utility"],
+	"description": "Live overlay with your attempts, deaths, session best and play time, plus IPGDGLL rank and record submitting.",
+	"tags": [
+		"interface",
+		"utility"
+	],
 	"settings": {
 		"show-overlay": {
 			"type": "bool",
@@ -22,7 +25,12 @@
 			"name": "Position",
 			"description": "Which corner of the screen the overlay sits in.",
 			"default": "Top Left",
-			"one-of": ["Top Left", "Top Right", "Bottom Left", "Bottom Right"]
+			"one-of": [
+				"Top Left",
+				"Top Right",
+				"Bottom Left",
+				"Bottom Right"
+			]
 		},
 		"scale": {
 			"type": "float",
@@ -52,6 +60,28 @@
 			"name": "New Best Popup",
 			"description": "Flash a \"NEW BEST\" message when you beat your session best.",
 			"default": true
+		},
+		"ipgdgll-title": {
+			"type": "title",
+			"name": "IPGDGLL"
+		},
+		"ipgdgll-rank": {
+			"type": "bool",
+			"name": "Show IPGDGLL Rank",
+			"description": "Show the level's place on IPGDGLL in the overlay when it's on the list.",
+			"default": true
+		},
+		"ipgdgll-submit": {
+			"type": "bool",
+			"name": "Send Progress",
+			"description": "When you get a new best on an IPGDGLL level, send it as a pending record (admins still review it). Needs your mod token.",
+			"default": true
+		},
+		"ipgdgll-token": {
+			"type": "string",
+			"name": "Mod Token",
+			"description": "Copy this from your profile page on ipgdgll.vercel.app (Geode mod section). Keep it private.",
+			"default": ""
 		}
 	}
 }
