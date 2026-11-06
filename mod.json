@@ -6,7 +6,7 @@
 	},
 	"id": "pester.ipgdgll-list",
 	"name": "IPGDGLL List",
-	"version": "v2.0.0",
+	"version": "v2.1.0",
 	"developer": "Pester",
 	"description": "Browse the IPGDGLL list right inside GD, from a button on the Search screen.",
 	"tags": [
@@ -25,6 +25,12 @@
 			"name": "Mod Token",
 			"description": "Copy this from your profile page on ipgdgll.vercel.app (Geode mod section). Keep it private.",
 			"default": ""
+		},
+		"check-updates": {
+			"type": "bool",
+			"name": "Check for Updates",
+			"description": "When GD starts, check for a new version of this mod and offer to install it.",
+			"default": true
 		}
 	}
 }

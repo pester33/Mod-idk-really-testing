@@ -1,6 +1,8 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/LevelSearchLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/MenuLayer.hpp>
+#include <Geode/ui/TextInput.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
 
@@ -19,6 +21,11 @@ static web::WebRequest supabaseRequest() {
     return req;
 }
 
+static std::string lower(std::string s) {
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
 // ---------------------------------------------------------------------------
 // The list popup
 // ---------------------------------------------------------------------------
@@ -34,15 +41,17 @@ struct ListLevel {
 class IpgdgllListPopup : public Popup {
 protected:
     static constexpr float WIDTH = 400.f;
-    static constexpr float HEIGHT = 270.f;
+    static constexpr float HEIGHT = 290.f;
+    static constexpr float LIST_Y = 116.f; // centre of the list
     static constexpr float LIST_W = 360.f;
-    static constexpr float LIST_H = 195.f;
+    static constexpr float LIST_H = 168.f;
     static constexpr float ROW_H = 34.f;
 
     ScrollLayer* m_list = nullptr;
     CCLabelBMFont* m_status = nullptr;
     std::vector<ListLevel> m_levels;
     std::string m_filter = "All";
+    std::string m_search;
     std::vector<CCMenuItemSpriteExtra*> m_tabs;
     async::TaskHolder<web::WebResponse> m_task;
 
@@ -57,17 +66,17 @@ protected:
         bg->setColor({ 0, 0, 0 });
         bg->setOpacity(80);
         bg->setContentSize({ LIST_W + 6.f, LIST_H + 6.f });
-        bg->setPosition({ center.width, center.height - 16.f });
+        bg->setPosition({ center.width, LIST_Y });
         m_mainLayer->addChild(bg);
 
         m_list = ScrollLayer::create({ LIST_W, LIST_H });
-        m_list->setPosition({ center.width - LIST_W / 2, center.height - 16.f - LIST_H / 2 });
+        m_list->setPosition({ center.width - LIST_W / 2, LIST_Y - LIST_H / 2 });
         m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(3.f));
         m_mainLayer->addChild(m_list);
 
         m_status = CCLabelBMFont::create("Loading...", "bigFont.fnt");
         m_status->setScale(0.5f);
-        m_status->setPosition({ center.width, center.height - 16.f });
+        m_status->setPosition({ center.width, LIST_Y });
         m_mainLayer->addChild(m_status, 5);
 
         // All / Possible / Impossible tabs (same as the website)
@@ -94,8 +103,30 @@ protected:
         auto webBtn = CCMenuItemExt::createSpriteExtra(webSpr, [](CCMenuItemSpriteExtra*) {
             web::openLinkInBrowser("https://ipgdgll.vercel.app");
         });
-        webBtn->setPosition({ center.width, 14.f });
+        webBtn->setPosition({ center.width - 45.f, 14.f });
         m_buttonMenu->addChild(webBtn);
+
+        // Reload the list without closing the popup
+        auto refreshSpr = ButtonSprite::create("Refresh", "goldFont.fnt", "GJ_button_01.png", 0.8f);
+        refreshSpr->setScale(0.55f);
+        auto refreshBtn = CCMenuItemExt::createSpriteExtra(refreshSpr, [this](CCMenuItemSpriteExtra*) {
+            m_list->m_contentLayer->removeAllChildren();
+            m_status->setString("Loading...");
+            m_status->setVisible(true);
+            this->load();
+        });
+        refreshBtn->setPosition({ center.width + 45.f, 14.f });
+        m_buttonMenu->addChild(refreshBtn);
+
+        // Search bar: filters by level name or creator as you type
+        auto search = TextInput::create(LIST_W - 10.f, "Search levels...", "bigFont.fnt");
+        search->setPosition({ center.width, HEIGHT - 74.f });
+        search->setScale(0.85f);
+        search->setCallback([this](std::string const& text) {
+            m_search = lower(text);
+            this->rebuild();
+        });
+        m_mainLayer->addChild(search);
 
         this->load();
         return true;
@@ -152,11 +183,17 @@ protected:
         for (auto& lvl : m_levels) {
             if (m_filter == "Possible" && !lvl.possible) continue;
             if (m_filter == "Impossible" && lvl.possible) continue;
+            if (!m_search.empty()
+                && lower(lvl.name).find(m_search) == std::string::npos
+                && lower(lvl.creator).find(m_search) == std::string::npos
+                && fmt::format("#{}", lvl.rank) != m_search
+                && std::to_string(lvl.rank) != m_search) continue;
             content->addChild(this->createRow(lvl));
             shown++;
         }
 
         if (m_levels.empty()) m_status->setString("The list is empty.");
+        else if (shown == 0 && !m_search.empty()) m_status->setString("No levels match your search.");
         else if (shown == 0) m_status->setString(fmt::format("No {} levels.", m_filter).c_str());
         m_status->setVisible(shown == 0);
 
@@ -383,5 +420,83 @@ class $modify(IpgdgllPlayLayer, PlayLayer) {
             f->completed = true;
             this->maybeSubmit(100);
         }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Self-updater: checks GitHub for a newer build when GD starts
+// ---------------------------------------------------------------------------
+
+static constexpr auto RELEASE_BASE = "https://github.com/pester33/Mod-idk-really-testing/releases/download/latest-build/";
+
+static async::TaskHolder<web::WebResponse> s_updateTask;
+
+static void installUpdate(std::string version) {
+    auto loading = Notification::create("Downloading IPGDGLL List update...", NotificationIcon::Loading, 0.f);
+    loading->show();
+
+    web::WebRequest req;
+    req.timeout(std::chrono::seconds(60));
+    s_updateTask.spawn(
+        req.get(fmt::format("{}{}.geode", RELEASE_BASE, Mod::get()->getID())),
+        [loading = Ref(loading), version](web::WebResponse res) {
+            loading->hide();
+            auto const& data = res.data();
+            // A .geode file is a zip: must start with "PK"
+            if (!res.ok() || data.size() < 4 || data[0] != 'P' || data[1] != 'K') {
+                log::warn("Update download failed: HTTP {}", res.code());
+                Notification::create("Update failed to download", NotificationIcon::Error)->show();
+                return;
+            }
+            // Replace our own .geode file; Geode loads the new one on the next start
+            auto written = file::writeBinarySafe(Mod::get()->getPackagePath(), data);
+            if (!written) {
+                log::warn("Update install failed: {}", written.unwrapErr());
+                Notification::create("Update failed to install", NotificationIcon::Error)->show();
+                return;
+            }
+            createQuickPopup(
+                "Update installed",
+                fmt::format("IPGDGLL List <cg>{}</c> is installed. Restart GD to use it.", version),
+                "Later", "Restart",
+                [](auto, bool restart) {
+                    if (restart) game::restart(true);
+                }
+            );
+        }
+    );
+}
+
+static void checkForUpdate() {
+    web::WebRequest req;
+    req.timeout(std::chrono::seconds(15));
+    s_updateTask.spawn(req.get(fmt::format("{}version.txt", RELEASE_BASE)), [](web::WebResponse res) {
+        if (!res.ok()) return;
+        auto latest = VersionInfo::parse(utils::string::trim(res.string().unwrapOr("")));
+        if (!latest) return;
+        auto current = Mod::get()->getVersion();
+        if (!(latest.unwrap() > current)) return;
+
+        auto version = latest.unwrap().toVString();
+        createQuickPopup(
+            "IPGDGLL List",
+            fmt::format("A new version is out: <cg>{}</c> (you have {}).\nUpdate now?", version, current.toVString()),
+            "Later", "Update",
+            [version](auto, bool update) {
+                if (update) installUpdate(version);
+            }
+        );
+    });
+}
+
+class $modify(IpgdgllMenuLayer, MenuLayer) {
+    bool init() {
+        if (!MenuLayer::init()) return false;
+        static bool checked = false;
+        if (!checked && Mod::get()->getSettingValue<bool>("check-updates")) {
+            checked = true;
+            checkForUpdate();
+        }
+        return true;
     }
 };
